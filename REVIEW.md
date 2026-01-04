@@ -2,10 +2,10 @@
 
 ## What it does
 - Crawls Nature Human Behaviour and Palgrave Communications research-articles pages.
-- Filters for papers published between 2023 and 2025 (inclusive).
+- Filters for papers published between 2023 and 2026 (inclusive).
 - Keeps only papers with GitHub code links (OSF-only code is excluded).
 - Downloads PDF, GitHub code zip, supplementary files, and peer review files when available.
-- Writes a per-article metadata.json with ESM link mapping.
+- Writes a per-article metadata.json with ESM link mapping and statuses.
 
 ## Implementation notes
 - Uses the journal research-articles listing pages (sorted by publication date) and paginates until enough matches are collected.
@@ -17,6 +17,7 @@
 - Logs download progress for file downloads.
 - Respects robots.txt via urllib.robotparser and throttles requests with a configurable delay.
 - Screening and downloading are split into two phases: the crawler only downloads files after it has confirmed all filter conditions.
+- When robots.txt disallows a resource, it is marked for manual supplementation and skipped.
 
 ## Output structure
 Paths are created under the working directory by default:
@@ -26,6 +27,7 @@ Paths are created under the working directory by default:
 - `output/<category>/<article-slug>/code/` : GitHub code zip
 - `output/<category>/<article-slug>/data/` : data files
 - `output/<category>/<article-slug>/metadata.json` : article metadata + ESM mapping
+- `output/summary.csv` : papers with paper/review/code files present
 
 ## Usage
 Install dependencies:

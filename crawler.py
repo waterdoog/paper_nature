@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import csv
 import json
 import os
 import re
@@ -56,9 +57,12 @@ class ESMResource:
 @dataclass
 class ScreeningResult:
     article: ArticleData
-    code_zip_url: str
+    code_zip_url: Optional[str]
     code_repo: str
     peer_review_resource: ESMResource
+    pdf_status: str
+    peer_review_status: str
+    code_status: str
 
 
 class RobotsCache:
@@ -234,22 +238,17 @@ def is_html_content(content_type: str) -> bool:
     return "text/html" in (content_type or "").lower()
 
 
-def head_allows(fetcher: ThrottledFetcher, robots: RobotsCache, url: str, kind: str, article_url: str) -> bool:
+def screen_resource(
+    fetcher: ThrottledFetcher, robots: RobotsCache, url: str, kind: str, article_url: str
+) -> Tuple[str, str]:
     if not robots.allowed(url):
-        print(f"[skip] reason=robots_disallowed kind={kind} url={article_url} resource={url}")
-        return False
+        return "manual_required", "robots_disallowed"
     status, content_type, _ = fetcher.head_info(url)
     if status is None or status >= 400:
-        print(
-            f"[skip] reason={kind}_unavailable status={status} url={article_url} resource={url}"
-        )
-        return False
+        return "unavailable", f"status={status}"
     if is_html_content(content_type):
-        print(
-            f"[skip] reason={kind}_unexpected_content_type content_type={content_type} url={article_url} resource={url}"
-        )
-        return False
-    return True
+        return "unavailable", f"content_type={content_type}"
+    return "downloadable", ""
 
 
 def repo_zip_name(repo_url: str) -> str:
@@ -259,13 +258,19 @@ def repo_zip_name(repo_url: str) -> str:
 
 def find_working_zip_url(
     fetcher: ThrottledFetcher, robots: RobotsCache, repo_urls: Sequence[str], article_url: str
-) -> Tuple[Optional[str], Optional[str]]:
+) -> Tuple[Optional[str], Optional[str], str]:
+    saw_manual = False
     for repo_url in repo_urls:
         for zip_url in github_zip_urls(repo_url):
-            if not head_allows(fetcher, robots, zip_url, "code_zip", article_url):
+            status, reason = screen_resource(fetcher, robots, zip_url, "code_zip", article_url)
+            if status == "downloadable":
+                return zip_url, repo_url, "downloadable"
+            if status == "manual_required":
+                saw_manual = True
                 continue
-            return zip_url, repo_url
-    return None, None
+        if saw_manual:
+            return None, repo_url, "manual_required"
+    return None, repo_urls[0] if repo_urls else None, "manual_required"
 
 
 def extract_jsonld_metadata(soup: BeautifulSoup) -> Dict[str, str]:
@@ -549,6 +554,96 @@ def cleanup_article_dir(path: str) -> None:
         pass
 
 
+def list_existing_article_dirs(category_dir: str) -> List[str]:
+    if not os.path.isdir(category_dir):
+        return []
+    dirs = []
+    for entry in os.scandir(category_dir):
+        if not entry.is_dir():
+            continue
+        meta_path = os.path.join(entry.path, "metadata.json")
+        if os.path.exists(meta_path):
+            dirs.append(entry.path)
+    return sorted(dirs)
+
+
+def load_metadata_for_dir(article_dir: str) -> Dict[str, object]:
+    meta_path = os.path.join(article_dir, "metadata.json")
+    record: Dict[str, object] = {}
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf-8") as handle:
+                record = json.load(handle)
+        except Exception:
+            record = {}
+    output = record.get("output", {}) if isinstance(record.get("output"), dict) else {}
+    output.setdefault("article_dir", article_dir)
+    output.setdefault("pdf", os.path.join("pdf_papers", "paper.pdf"))
+    output.setdefault(
+        "peer_review_file", os.path.join("supplementary_materials", "Peer_Review_File.pdf")
+    )
+    if not output.get("code_zip"):
+        code_dir = os.path.join(article_dir, "code")
+        if os.path.isdir(code_dir):
+            for entry in os.scandir(code_dir):
+                if entry.is_file() and entry.name.lower().endswith(".zip"):
+                    output["code_zip"] = os.path.join("code", entry.name)
+                    break
+    record["output"] = output
+    if "category" not in record:
+        record["category"] = os.path.basename(os.path.dirname(article_dir))
+    return record
+
+
+def resolve_output_path(article_dir: str, relative_path: str, fallback: Optional[str] = None) -> str:
+    if relative_path:
+        return os.path.join(article_dir, relative_path)
+    return os.path.join(article_dir, fallback) if fallback else ""
+
+
+def write_summary_csv(base_dir: str, records: Sequence[Dict[str, object]]) -> None:
+    summary_path = os.path.join(base_dir, "summary.csv")
+    fieldnames = [
+        "category",
+        "article_slug",
+        "title",
+        "url",
+        "pdf_path",
+        "review_path",
+        "code_path",
+    ]
+    with open(summary_path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for record in records:
+            output = record.get("output", {})
+            article_dir = output.get("article_dir", "")
+            if not article_dir:
+                continue
+            pdf_path = resolve_output_path(
+                article_dir, output.get("pdf", ""), os.path.join("pdf_papers", "paper.pdf")
+            )
+            review_path = resolve_output_path(
+                article_dir,
+                output.get("peer_review_file", ""),
+                os.path.join("supplementary_materials", "Peer_Review_File.pdf"),
+            )
+            code_path = resolve_output_path(article_dir, output.get("code_zip", ""))
+            if not (os.path.exists(pdf_path) and os.path.exists(review_path) and os.path.exists(code_path)):
+                continue
+            writer.writerow(
+                {
+                    "category": record.get("category", ""),
+                    "article_slug": os.path.basename(article_dir),
+                    "title": record.get("title", ""),
+                    "url": record.get("url", ""),
+                    "pdf_path": pdf_path,
+                    "review_path": review_path,
+                    "code_path": code_path,
+                }
+            )
+
+
 def download_github_zip(
     fetcher: ThrottledFetcher,
     repo_urls: Sequence[str],
@@ -594,9 +689,20 @@ def crawl_journal(
     os.makedirs(base_dir, exist_ok=True)
     category_dir = os.path.join(base_dir, journal.category)
     os.makedirs(category_dir, exist_ok=True)
+    existing_dirs = list_existing_article_dirs(category_dir)
+    existing_records = [load_metadata_for_dir(path) for path in existing_dirs]
+    existing_slugs = {os.path.basename(path) for path in existing_dirs}
+    if existing_records:
+        collected.extend(existing_records[:n_per_journal])
+    if len(collected) >= n_per_journal:
+        print(
+            f"[info] Using {len(collected)} existing articles for {journal.slug}; skipping crawl."
+        )
+        return collected
+    remaining = n_per_journal - len(collected)
 
     print(f"[info] Screening {journal.slug} for eligible articles...")
-    while len(candidates) < n_per_journal and pages < max_pages:
+    while len(candidates) < remaining and pages < max_pages:
         pages += 1
         list_url = journal.list_url_template.format(page=pages)
         if not robots.allowed(list_url):
@@ -625,10 +731,13 @@ def crawl_journal(
                     f"[skip] reason=out_of_year_range_after_{end_year} url={article_url}"
                 )
                 continue
-            if len(candidates) >= n_per_journal:
+            if len(candidates) >= remaining:
                 break
             if not robots.allowed(article_url):
                 print(f"[skip] reason=robots_disallowed url={article_url}")
+                continue
+            article_slug = safe_filename(urlparse(article_url).path.strip("/").split("/")[-1])
+            if article_slug in existing_slugs:
                 continue
             try:
                 article_html = fetcher.fetch_text(article_url)
@@ -649,22 +758,43 @@ def crawl_journal(
             if not peer_review_resource:
                 print(f"[skip] reason=missing_peer_review_file url={article_url}")
                 continue
-            if not head_allows(fetcher, robots, article.pdf_url, "pdf", article_url):
+
+            pdf_status, pdf_reason = screen_resource(fetcher, robots, article.pdf_url, "pdf", article_url)
+            if pdf_status == "unavailable":
+                print(f"[skip] reason=pdf_unavailable {pdf_reason} url={article_url}")
                 continue
-            if not head_allows(fetcher, robots, peer_review_resource.url, "peer_review", article_url):
+            if pdf_status == "manual_required":
+                print(f"[manual] reason=robots_disallowed kind=pdf url={article_url} resource={article.pdf_url}")
+
+            review_status, review_reason = screen_resource(
+                fetcher, robots, peer_review_resource.url, "peer_review", article_url
+            )
+            if review_status == "unavailable":
+                print(f"[skip] reason=peer_review_unavailable {review_reason} url={article_url}")
                 continue
-            code_zip_url, code_repo = find_working_zip_url(
+            if review_status == "manual_required":
+                print(
+                    f"[manual] reason=robots_disallowed kind=peer_review url={article_url} resource={peer_review_resource.url}"
+                )
+
+            code_zip_url, code_repo, code_status = find_working_zip_url(
                 fetcher, robots, article.github_repos, article_url
             )
-            if not code_zip_url or not code_repo:
-                print(f"[skip] reason=github_zip_unavailable url={article_url}")
+            if not code_repo:
+                print(f"[skip] reason=github_repo_missing url={article_url}")
                 continue
+            if code_status == "manual_required":
+                print(f"[manual] reason=code_zip_unavailable url={article_url} repo={code_repo}")
+
             candidates.append(
                 ScreeningResult(
                     article=article,
                     code_zip_url=code_zip_url,
                     code_repo=code_repo,
                     peer_review_resource=peer_review_resource,
+                    pdf_status=pdf_status,
+                    peer_review_status=review_status,
+                    code_status=code_status,
                 )
             )
 
@@ -691,44 +821,81 @@ def crawl_journal(
         supp_paths: List[str] = []
         data_paths: List[str] = []
         peer_review_path = ""
+        manual_required: List[str] = []
+
+        pdf_status = result.pdf_status
+        review_status = result.peer_review_status
+        code_status = result.code_status
+        peer_review_expected_path = os.path.join(article_paths["supp"], peer_review_name)
+        if os.path.exists(peer_review_expected_path):
+            peer_review_path = peer_review_expected_path
+            review_status = "present"
+        elif review_status == "manual_required":
+            manual_required.append("peer_review")
 
         if not dry_run:
-            if robots.allowed(article.pdf_url):
+            if os.path.exists(pdf_path):
+                pdf_status = "present"
+            elif pdf_status == "downloadable":
+                if robots.allowed(article.pdf_url):
+                    try:
+                        fetcher.download_file(
+                            article.pdf_url, pdf_path, label=f"{article_slug} paper.pdf"
+                        )
+                        pdf_status = "downloaded"
+                    except Exception as exc:
+                        print(f"[error] PDF download failed {article.pdf_url}: {exc}")
+                        if not article_dir_exists:
+                            cleanup_article_dir(article_paths["article"])
+                        continue
+                else:
+                    pdf_status = "manual_required"
+                    manual_required.append("pdf")
+                    print(f"[manual] reason=robots_disallowed kind=pdf url={article.url} resource={article.pdf_url}")
+            else:
+                manual_required.append("pdf")
+                print(f"[manual] reason=manual_required kind=pdf url={article.url} resource={article.pdf_url}")
+
+            zip_name = repo_zip_name(result.code_repo)
+            code_zip_path = os.path.join(article_paths["code"], zip_name)
+            if os.path.exists(code_zip_path):
+                code_status = "present"
+            elif code_status == "downloadable" and result.code_zip_url:
                 try:
                     fetcher.download_file(
-                        article.pdf_url, pdf_path, label=f"{article_slug} paper.pdf"
+                        result.code_zip_url, code_zip_path, label=f"{article_slug} {zip_name}"
                     )
+                    code_status = "downloaded"
                 except Exception as exc:
-                    print(f"[error] PDF download failed {article.pdf_url}: {exc}")
+                    print(f"[error] GitHub zip download failed for {result.code_repo}: {exc}")
                     if not article_dir_exists:
                         cleanup_article_dir(article_paths["article"])
                     continue
             else:
-                print(f"[robots] Skip PDF disallowed: {article.pdf_url}")
-                if not article_dir_exists:
-                    cleanup_article_dir(article_paths["article"])
-                continue
-
-            zip_name = repo_zip_name(result.code_repo)
-            code_zip_path = os.path.join(article_paths["code"], zip_name)
-            try:
-                fetcher.download_file(
-                    result.code_zip_url, code_zip_path, label=f"{article_slug} {zip_name}"
-                )
-            except Exception as exc:
-                print(f"[error] GitHub zip download failed for {result.code_repo}: {exc}")
-                if not article_dir_exists:
-                    cleanup_article_dir(article_paths["article"])
-                continue
+                code_status = "manual_required"
+                manual_required.append("code")
+                print(f"[manual] reason=manual_required kind=code url={article.url} repo={result.code_repo}")
 
             for resource in article.esm_resources:
+                if resource.category == "peer_review" and review_status != "downloadable":
+                    continue
                 if not robots.allowed(resource.url):
+                    manual_required.append(resource.category)
                     continue
                 if resource.category == "data":
                     target_dir = article_paths["data"]
                 else:
                     target_dir = article_paths["supp"]
                 dest_path = os.path.join(target_dir, resource.filename)
+                if os.path.exists(dest_path):
+                    if resource.category == "data":
+                        data_paths.append(dest_path)
+                    elif resource.category == "peer_review" and resource.filename == "Peer_Review_File.pdf":
+                        peer_review_path = dest_path
+                        supp_paths.append(dest_path)
+                    else:
+                        supp_paths.append(dest_path)
+                    continue
                 try:
                     fetcher.download_file(
                         resource.url, dest_path, label=f"{article_slug} {resource.filename}"
@@ -744,7 +911,7 @@ def crawl_journal(
                     print(f"[error] Failed to download {resource.filename} from {resource.url}: {exc}")
                     continue
 
-            if not peer_review_path:
+            if not peer_review_path and review_status != "manual_required":
                 print(f"[error] Missing Peer Review file for {article.url}")
                 if not article_dir_exists:
                     cleanup_article_dir(article_paths["article"])
@@ -771,6 +938,12 @@ def crawl_journal(
             "github_repos": article.github_repos,
             "used_github_repo": used_repo or "",
             "pdf_url": article.pdf_url,
+            "status": {
+                "pdf": pdf_status,
+                "peer_review": review_status,
+                "code": code_status,
+            },
+            "manual_required": sorted(set(manual_required)),
             "output": {
                 "article_dir": article_paths["article"],
                 "pdf": "pdf_papers/paper.pdf" if not dry_run else "",
@@ -833,10 +1006,10 @@ def build_journals() -> List[JournalConfig]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Nature journal crawler for 2023-2025 papers with GitHub code.")
+    parser = argparse.ArgumentParser(description="Nature journal crawler for 2023-2026 papers with GitHub code.")
     parser.add_argument("--n", type=int, required=True, help="Number of papers per category/journal.")
     parser.add_argument("--start-year", type=int, default=2023)
-    parser.add_argument("--end-year", type=int, default=2025)
+    parser.add_argument("--end-year", type=int, default=2026)
     parser.add_argument("--delay", type=float, default=1.0, help="Delay between requests in seconds.")
     parser.add_argument("--timeout", type=int, default=30)
     parser.add_argument("--retries", type=int, default=3)
@@ -851,6 +1024,7 @@ def main() -> int:
     fetcher = ThrottledFetcher(args.user_agent, args.delay, args.timeout, args.retries)
 
     total = 0
+    all_records: List[Dict[str, object]] = []
     for journal in journals:
         print(f"[info] Crawling {journal.name} ({journal.category})...")
         records = crawl_journal(
@@ -866,8 +1040,10 @@ def main() -> int:
         )
         print(f"[info] Collected {len(records)} records for {journal.slug}.")
         total += len(records)
+        all_records.extend(records)
 
     print(f"[done] Total collected: {total}")
+    write_summary_csv(args.output_dir, all_records)
     return 0
 
 
