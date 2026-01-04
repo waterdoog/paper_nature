@@ -31,7 +31,6 @@ logs/
 dist/
 build/
 *.egg-info/
-output/
 
 # Credentials and secrets
 *.env
