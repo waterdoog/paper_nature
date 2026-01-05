@@ -17,6 +17,7 @@ def screen_journal(
     fetcher: ThrottledFetcher,
     robots: RobotsCache,
     existing_slugs: Set[str],
+    url_cache: dict[str, str],
 ) -> List[ScreeningResult]:
     """Return screened candidates without downloading any files."""
     candidates: List[ScreeningResult] = []
@@ -55,8 +56,13 @@ def screen_journal(
                 continue
             if len(candidates) >= remaining:
                 break
+            cached_reason = url_cache.get(article_url)
+            if cached_reason:
+                print(f"[skip] reason=cached:{cached_reason} url={article_url}")
+                continue
             if not robots.allowed(article_url):
                 print(f"[skip] reason=robots_disallowed url={article_url}")
+                url_cache[article_url] = "robots_disallowed"
                 continue
             article_slug = safe_filename(urlparse(article_url).path.strip("/").split("/")[-1])
             if article_slug in existing_slugs:
@@ -70,15 +76,18 @@ def screen_journal(
             article = extract_article_data(journal, article_url, article_html)
             if not article.github_repos:
                 print(f"[skip] reason=missing_github_link url={article_url}")
+                url_cache[article_url] = "missing_github_link"
                 continue
             if not article.pdf_url:
                 print(f"[skip] reason=missing_pdf_link url={article_url}")
+                url_cache[article_url] = "missing_pdf_link"
                 continue
             peer_review_resource = next(
                 (res for res in article.esm_resources if res.category == "peer_review"), None
             )
             if not peer_review_resource:
                 print(f"[skip] reason=missing_peer_review_file url={article_url}")
+                url_cache[article_url] = "missing_peer_review_file"
                 continue
 
             pdf_status, pdf_reason = screen_resource(fetcher, robots, article.pdf_url)

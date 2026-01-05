@@ -84,6 +84,29 @@ def collect_existing_records(base_dir: str) -> List[Dict[str, object]]:
     return records
 
 
+def load_url_cache(base_dir: str, journal_slug: str) -> Dict[str, str]:
+    cache_dir = os.path.join(base_dir, ".cache")
+    cache_path = os.path.join(cache_dir, f"{journal_slug}_seen.json")
+    if not os.path.exists(cache_path):
+        return {}
+    try:
+        with open(cache_path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except Exception:
+        return {}
+    if isinstance(data, dict):
+        return {str(k): str(v) for k, v in data.items()}
+    return {}
+
+
+def save_url_cache(base_dir: str, journal_slug: str, cache: Dict[str, str]) -> None:
+    cache_dir = os.path.join(base_dir, ".cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_path = os.path.join(cache_dir, f"{journal_slug}_seen.json")
+    with open(cache_path, "w", encoding="utf-8") as handle:
+        json.dump(cache, handle, ensure_ascii=True, indent=2)
+
+
 def resolve_output_path(article_dir: str, relative_path: str, fallback: Optional[str] = None) -> str:
     if relative_path:
         return os.path.join(article_dir, relative_path)

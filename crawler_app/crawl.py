@@ -5,7 +5,7 @@ from .download_flow import download_candidates
 from .http_client import RobotsCache, ThrottledFetcher
 from .models import JournalConfig
 from .screening_flow import screen_journal
-from .storage import list_existing_article_dirs, load_metadata_for_dir
+from .storage import list_existing_article_dirs, load_metadata_for_dir, load_url_cache, save_url_cache
 
 
 def crawl_journal(
@@ -37,6 +37,7 @@ def crawl_journal(
         return collected
 
     remaining = n_per_journal - len(collected)
+    url_cache = load_url_cache(base_dir, journal.slug)
     candidates = screen_journal(
         journal=journal,
         remaining=remaining,
@@ -46,7 +47,9 @@ def crawl_journal(
         fetcher=fetcher,
         robots=robots,
         existing_slugs=existing_slugs,
+        url_cache=url_cache,
     )
+    save_url_cache(base_dir, journal.slug, url_cache)
     collected.extend(
         download_candidates(
             journal=journal,
