@@ -18,6 +18,7 @@
 - Respects robots.txt via urllib.robotparser and throttles requests with a configurable delay.
 - Screening and downloading are split into two phases: the crawler only downloads files after it has confirmed all filter conditions.
 - When robots.txt disallows a resource, it is marked for manual supplementation and skipped.
+- Source code is modularized under `crawler_app/` with `crawler.py` as the entrypoint.
 
 ## Output structure
 Paths are created under the working directory by default:
